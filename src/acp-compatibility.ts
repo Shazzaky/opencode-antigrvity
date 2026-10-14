@@ -13,6 +13,9 @@ import { acpDistribution } from "./acp-install.js";
 const profiles: Record<string, [string, string]> = {
   "linux-x64": ["cf6feaebdacfc2255dcfc8883db99b15de8554698554e2a1e78e5ccec1c68a20", "63042ca43fc7a69600683920f7706689b82cf8aecefe21dc18cf35e99c9dde4d"],
   "win32-x64": ["bc86a76bfe422a58aed70300fdab65457c7439b9fcb7d3f6c314ea6f79601fa3", "b200d5e01725784b45f99ee532b0da22f5fb43f01b16ecd69f225bf1ddf36557"],
+  // Official macOS arm64 1.3.0 binaries. Byte identity only; tool-filter
+  // behavior not reviewed like the profiles above.
+  "darwin-arm64": ["cb1f0725183ed922079ed6cd1d2422b4d8be44c5fb60be3e9a43d8d04f99a18e", "b04b00662c1821b953a409d43626b86d1229130eeb2078b4e1304c06199aa481"],
 };
 async function sha256(path: string): Promise<string> {
   const hash = createHash("sha256");
