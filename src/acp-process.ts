@@ -193,15 +193,18 @@ function isMissingSessionError(error: unknown): boolean {
   return /session.{0,200}not found|unknown session|invalid session|no such session|cannot load (?:stored )?session|method not found|session (?:cannot be resumed|is not resumable|has expired)|resume (?:is )?not supported/i.test(message);
 }
 
-function terminateProcess(child: ChildProcess, force = false): void {
+async function terminateProcess(child: ChildProcess, force = false): Promise<void> {
   const signal = force ? "SIGKILL" : "SIGTERM";
   try {
     if (child.pid && process.platform === "win32") {
       // The Windows PyInstaller launcher and its harness run as descendants;
       // killing only the launcher leaves inference/login processes alive.
       const taskkill = win32.join(process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows", "System32", "taskkill.exe");
-      execFile(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 }, error => {
-        if (error) { try { child.kill(signal); } catch { /* already exited */ } }
+      await new Promise<void>(resolve => {
+        execFile(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 }, error => {
+          if (error) { try { child.kill(signal); } catch { /* already exited */ } }
+          resolve();
+        });
       });
     }
     else if (child.pid) process.kill(-child.pid, signal);
@@ -284,7 +287,7 @@ export class AcpWorker {
           this.authenticationFailure = cliAuthenticationError();
           this.turnEvents?.close(this.authenticationFailure);
           this.connection?.close(this.authenticationFailure);
-          terminateProcess(child, true);
+          void terminateProcess(child, true);
         }
         if (this.stderrDiagnostic.length >= DEFAULT_MAX_STDERR_BYTES) return;
         this.stderrDiagnostic += (typeof chunk === "string" ? chunk : chunk.toString("utf8")).slice(0, DEFAULT_MAX_STDERR_BYTES - this.stderrDiagnostic.length);
@@ -545,11 +548,19 @@ export class AcpWorker {
         try { child.stdin?.end(); } catch { /* continue */ }
         await new Promise<void>((resolveResult) => {
           let timer: ReturnType<typeof setTimeout> | undefined;
-          const finish = () => { if (timer) clearTimeout(timer); resolveResult(); };
-          child.once("close", finish);
+          let closed = false;
+          let terminating = false;
+          const finish = () => { if (timer) clearTimeout(timer); child.removeListener("close", onClose); resolveResult(); };
+          const onClose = () => { closed = true; if (!terminating) finish(); };
+          child.once("close", onClose);
           timer = setTimeout(() => {
-            terminateProcess(child, force);
-            resolveResult();
+            terminating = true;
+            // taskkill must finish the entire Windows process tree before
+            // callers remove the worker's directory or open a replacement.
+            void terminateProcess(child, force).then(() => {
+              if (closed) finish();
+              else timer = setTimeout(finish, 1_000);
+            });
           }, force ? 500 : 3_000);
           timer.unref?.();
         });

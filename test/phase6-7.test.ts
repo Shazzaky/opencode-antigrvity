@@ -86,7 +86,7 @@ test("utility retention removes dead abandoned private directories but protects 
 });
 
 test("unknown ACP overrides fail closed regardless of version text", async () => {
-  await expect(assertHostToolCompatibility(join(import.meta.dir, "fixtures/fake-acp.mjs"))).rejects.toThrow(/no tested host-tool isolation profile/);
+  await expect(assertHostToolCompatibility(join(import.meta.dir, "fixtures/fake-acp.mjs"))).rejects.toMatchObject({ code: "agy_acp_compatibility", kind: "unsupported" });
 });
 
 test("lock release cannot delete a replacement owner; dead reaper and primary recover", async () => {
