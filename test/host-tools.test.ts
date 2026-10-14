@@ -8,6 +8,7 @@ import { protocol as anthropicProtocol } from "@opencode/ai/protocols/anthropic-
 const Effect = await import(Bun.resolveSync("effect/Effect", dirname(import.meta.resolve("@opencode/ai"))));
 import { SESSION_HEADER } from "../src/constants.js";
 import { fixtureCompatibility } from "./fixtures/compatibility.js";
+import { sessionStore } from "../src/session-store.js";
 let compatibility: ReturnType<typeof fixtureCompatibility>;
 
 const directory = await mkdtemp(join(tmpdir(), "agy-host-tools-"));
@@ -34,6 +35,27 @@ const send = (session: string, messages: any[], extra: Record<string, unknown> =
   body: JSON.stringify({ model: "gemini-3.8-flash", tools: schema, system: "HOST_INSTRUCTIONS_UNTRUNCATED", messages, ...extra }),
 });
 const result = (id: string, text: string, is_error = false) => ({ type: "tool_result", tool_use_id: id, content: text, is_error });
+
+/** These scenarios require a two-call batch, not the bridge's best-effort
+ * 25 ms arrival grouping. Finish both durable writes before either wakes it. */
+async function sendParallel(session: string, messages: any[]): Promise<Response> {
+  const saveReceipt = sessionStore.saveReceipt.bind(sessionStore);
+  let arrivals = 0;
+  let release!: () => void;
+  let fail!: (error: Error) => void;
+  const batch = new Promise<void>((resolve, reject) => { release = resolve; fail = reject; });
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const persistence = spyOn(sessionStore, "saveReceipt").mockImplementation(async (...args) => {
+    await saveReceipt(...args);
+    if (args[2].state === "parked") {
+      if (++arrivals === 1) deadline = setTimeout(() => fail(new Error("Both parallel calls must reach durable parking")), 5_000);
+      if (arrivals === 2) { clearTimeout(deadline); release(); }
+      await batch;
+    }
+  });
+  try { return await send(session, messages); }
+  finally { clearTimeout(deadline); persistence.mockRestore(); }
+}
 
 test("installed host encoder preserves inline/promoted result images and image steering through proxy/MCP", async () => {
   // Sanitized synthetic payloads, >90 KiB decoded each; no private screenshots.
@@ -122,7 +144,7 @@ test("MCP negotiates opted-in SSE progress and reports cancellation as a termina
 
 test("parallel host calls park, partial results retain waiters without re-emission, then continue the same ACP prompt", async () => {
   const messages: any[] = [{ role: "user", content: "FAKE_MCP_PARALLEL" }];
-  const first = await (await send("parallel", messages)).json();
+  const first = await (await sendParallel("parallel", messages)).json();
   expect(first.stop_reason).toBe("tool_use"); expect(first.content).toHaveLength(2);
   messages.push({ role: "assistant", content: first.content }, { role: "user", content: [result(first.content[0].id, "ONE")] });
   const partialResponse = await send("parallel", messages);
@@ -172,7 +194,7 @@ test("host compaction leaves parked calls and their completed results intact", a
   const { sessionStore } = await import("../src/session-store.js");
   const host = "parked-compaction";
   const original = [{ role: "user", content: "FAKE_MCP_PARALLEL" }];
-  const first = await (await send(host, original)).json();
+  const first = await (await sendParallel(host, original)).json();
   const calls = first.content.filter((part: any) => part.type === "tool_use");
   expect(calls).toHaveLength(2);
   const partialMessages = [...original, { role: "assistant", content: first.content }, { role: "user", content: [result(calls[0].id, "COMPLETED_ONCE")] }];
@@ -205,7 +227,8 @@ test("tool schema and media conversion retain the native host contract", () => {
 
 test("restart recovers independently persisted parallel results without reexecuting calls", async () => {
   const messages: any[] = [{ role: "user", content: "FAKE_MCP_PARALLEL" }];
-  const first = await (await send("restart-parallel", messages)).json();
+  const first = await (await sendParallel("restart-parallel", messages)).json();
+  expect(first.content).toHaveLength(2);
   messages.push({ role: "assistant", content: first.content }, { role: "user", content: [result(first.content[0].id, "DURABLE_FIRST")] });
   await send("restart-parallel", messages);
   await closeHostBridges("restart-parallel");
@@ -227,7 +250,8 @@ test("lost result after both calls executed cannot cause recovery to execute eit
     return result(call.id, `EXECUTED_${call.id}`);
   });
   const messages: any[] = [{ role: "user", content: "FAKE_MCP_PARALLEL SIDE_EFFECT_COUNTS" }];
-  const first = await (await send("execution-counts", messages)).json();
+  const first = await (await sendParallel("execution-counts", messages)).json();
+  expect(first.content).toHaveLength(2);
   // Both host side effects happened, but only A's result reached the adapter.
   const completed = execute(first.content);
   messages.push({ role: "assistant", content: first.content }, { role: "user", content: [completed[0]] });
