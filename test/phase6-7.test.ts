@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { mkdtemp, writeFile, readFile, readdir, mkdir, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { acquireFileLock } from "../src/file-lock.js";
@@ -122,7 +124,7 @@ test("effective auth scopes overrides, project/location, endpoint and credential
     const first = await effectiveAuth(env);
     const override = await effectiveAuth({ ...env, OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD: "oauth-personal" });
     expect(override.settings.auth.type).toBe("oauth-personal");
-    expect(override.scope).not.toBe(first.scope);
+    expect(override.scope).toBe(first.scope);
     expect((await effectiveAuth({ ...env, GOOGLE_CLOUD_LOCATION: "eu" })).scope).not.toBe(first.scope);
     const adcDirectory = join(home, "gcloud");
     await mkdir(adcDirectory);

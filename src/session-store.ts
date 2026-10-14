@@ -473,6 +473,10 @@ async function atomicWrite(path: string, value: unknown): Promise<void> {
     try { await file.writeFile(JSON.stringify(value), "utf8"); await file.sync(); }
     finally { await file.close(); }
     await rename(temporary, path);
+    // Node cannot open/fsync directory handles on Windows. The file contents
+    // were flushed above and replacement is atomic; directory-entry crash
+    // durability is available only on platforms with directory fsync support.
+    if (process.platform === "win32") return;
     // Persist the rename and newly created private directory entries before
     // exposing calls/results. Atomic rename alone is not power-loss durability.
     const stop = dirname(resolve(dataDirectory()));

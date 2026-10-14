@@ -2,6 +2,8 @@ import { chmod, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { SessionPool } from "../src/session-pool.js";
 
 const fixture = join(import.meta.dir, "fixtures", "fake-acp.mjs");
@@ -23,6 +25,14 @@ async function turn(pool: SessionPool, key: string, prompt: string): Promise<str
 }
 
 describe("session pool isolation", () => {
+  test("closed pools reject requests as non-retryable client errors", async () => {
+    const pool = new SessionPool();
+    await pool.close();
+    await expect(turn(pool, "closed-pool", "never execute")).rejects.toMatchObject({
+      code: "agy_pool_closed", kind: "invalid_request", status: 400, retryable: false,
+    });
+  });
+
   test("keeps independent workers separate", async () => {
     await chmod(fixture, 0o755);
     process.env.OPENCODE_ANTIGRAVITY_DATA_DIR = await mkdtemp(join(tmpdir(), "opencode-antigravity-pool-"));

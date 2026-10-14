@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { chmod, mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SessionPool } from "../src/session-pool.js";

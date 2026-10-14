@@ -1,6 +1,10 @@
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { fixtureCompatibility } from "./fixtures/compatibility.js";
+let compatibility: ReturnType<typeof fixtureCompatibility>;
+beforeAll(() => { compatibility = fixtureCompatibility(); });
+afterAll(() => { compatibility.mockRestore(); });
 import { createAcpWorker } from "../src/acp-process.js";
 
 const fixture = join(import.meta.dir, "fixtures", "fake-acp.mjs");
@@ -157,11 +161,29 @@ describe("ACP process manager", () => {
     expect(stopReason).toBe("cancelled");
   });
 
-  test("can authenticate an ACP server without creating a workspace session", async () => {
+  test("never sends authenticate even with an explicit OAuth method", async () => {
     await chmod(fixture, 0o755);
-    const worker = await createAcpWorker({ cwd: process.cwd(), executable: fixture, authMethod: "oauth-personal", skipSession: true });
+    const worker = await createAcpWorker({ cwd: process.cwd(), executable: fixture, environment: { OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD: "oauth-personal", FAKE_ACP_REJECT_AUTHENTICATE: "1" } });
     expect(worker.init?.authMethods?.[0]?.id).toBe("oauth-personal");
     await worker.stop(true);
+  });
+
+  test("fails promptly if the server attempts to open a browser", async () => {
+    await expect(createAcpWorker({ cwd: process.cwd(), executable: fixture,
+      environment: { FAKE_ACP_BROWSER: "1" } })).rejects.toMatchObject({ code: "agy_cli_auth_required" });
+  });
+
+  test("authentication required does not trigger an interactive retry", async () => {
+    await expect(createAcpWorker({ cwd: process.cwd(), executable: fixture,
+      environment: { FAKE_ACP_REQUIRE_AUTH: "1", FAKE_ACP_REJECT_AUTHENTICATE: "1" } })).rejects.toThrow("Sign in through the agy CLI");
+  });
+
+  test("a browser login attempt during a turn becomes an auth error", async () => {
+    const worker = await createAcpWorker({ cwd: process.cwd(), executable: fixture });
+    try {
+      const turn = async () => { for await (const _event of worker.runTurn("FAKE_BROWSER")) { /* drain */ } };
+      await expect(turn()).rejects.toMatchObject({ code: "agy_cli_auth_required" });
+    } finally { await worker.stop(true); }
   });
 
   test("reports an ACP server exit before a result as a process failure", async () => {

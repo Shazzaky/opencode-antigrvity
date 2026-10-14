@@ -1,6 +1,8 @@
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { SessionPool } from "../src/session-pool.js";
 import { SessionStore } from "../src/session-store.js";
 import type { AcpEvent } from "../src/protocol.js";

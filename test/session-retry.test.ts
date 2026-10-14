@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

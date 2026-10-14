@@ -2,6 +2,16 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AgyError } from "./errors.js";
+
+export function cliAuthenticationError(): AgyError {
+  return new AgyError("auth", "Antigravity requires an authenticated agy CLI. Sign in through agy, then retry. The plugin does not start interactive login.", { code: "agy_cli_auth_required" });
+}
+
+/** Check the CLI source before starting ACP, including when old ACP tokens exist. */
+export async function requireCliAuthentication(environment: NodeJS.ProcessEnv): Promise<void> {
+  if (!await bridgeCliAuthentication(environment)) throw cliAuthenticationError();
+}
 
 function decodeSecret(bytes: number[], key = "gemini"): string {
   return bytes.map((byte, i) => String.fromCharCode(byte ^ key.charCodeAt(i % key.length))).join("");
@@ -57,8 +67,8 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
 /**
  * The standalone ACP server keeps a separate credential file from the CLI.
  * Seed or repair personal ACP credentials from the authenticated CLI. Account
- * switches in the CLI are reflected on the next worker; other ACP auth modes
- * and the CLI's source file are left alone.
+ * switches in the CLI are reflected on the next worker. The CLI's source file
+ * is left alone; ACP always uses the CLI's personal OAuth credentials.
  * The token itself never enters logs or the OpenCode request path.
  */
 export async function bridgeCliAuthentication(environment: NodeJS.ProcessEnv = process.env): Promise<boolean> {
@@ -74,14 +84,11 @@ export async function bridgeCliAuthentication(environment: NodeJS.ProcessEnv = p
   } catch {
     return false;
   }
-  const token = cli.token;
+  const token = cli?.token;
   if (typeof token?.refresh_token !== "string" || !token.refresh_token.trim()) return false;
   if (cli.auth_method && cli.auth_method !== "consumer" && cli.auth_method !== "oauth-personal") return false;
-  const requestedMethod = environment.OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD?.trim();
-  if (requestedMethod && requestedMethod !== "oauth-personal") return false;
   const settings = await readObject(settingsPath);
   const auth = settings.auth && typeof settings.auth === "object" ? settings.auth : {};
-  if (!requestedMethod && auth.type && auth.type !== "oauth-personal") return false;
   const existing = await readObject(acpPath);
   if (existing.refresh_token !== token.refresh_token || existing.client_id !== OAUTH_CLIENT_ID ||
       existing.client_secret !== OAUTH_CLIENT_SECRET || existing.token_uri !== OAUTH_TOKEN_URI ||
@@ -98,7 +105,7 @@ export async function bridgeCliAuthentication(environment: NodeJS.ProcessEnv = p
     await mkdir(acpDir, { recursive: true, mode: 0o700 });
     await writePrivateJson(acpPath, credentials);
   }
-  if (!requestedMethod && auth.type !== "oauth-personal") {
+  if (auth.type !== "oauth-personal") {
     await mkdir(acpDir, { recursive: true, mode: 0o700 });
     await writePrivateJson(settingsPath, { ...settings, auth: { ...auth, type: "oauth-personal" } });
   }

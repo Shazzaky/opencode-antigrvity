@@ -3,6 +3,7 @@
 import readline from "node:readline";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 if (process.env.FAKE_ACP_PID_LOG) fs.appendFileSync(process.env.FAKE_ACP_PID_LOG, `${process.pid}\n`);
 
@@ -104,6 +105,10 @@ async function handlePrompt(message) {
     respond(id, { stopReason: "end_turn" }); activePrompt = undefined; return;
   }
   if (text.includes("FAKE_HANG")) return;
+  if (text.includes("FAKE_BROWSER")) {
+    spawnSync("python3", ["-c", "import webbrowser; webbrowser.open('https://example.invalid/login')"], { stdio: ["ignore", "ignore", "inherit"] });
+    return;
+  }
   if (text.includes("FAKE_EXIT")) process.exit(1);
   if (text.includes("FAKE_AUTH_ERROR")) {
     fail(id, -32000, "authentication required");
@@ -192,8 +197,14 @@ input.on("line", (line) => {
       agentInfo: { name: "fake-antigravity-acp", title: "Fake ACP", version: "test" },
     });
   } else if (message?.method === "authenticate") {
+    if (process.env.FAKE_ACP_REJECT_AUTHENTICATE) { fail(message.id, -32000, "Unexpected authenticate request"); return; }
     respond(message.id, {});
   } else if (message?.method === "session/new") {
+    if (process.env.FAKE_ACP_BROWSER) {
+      spawnSync("python3", ["-c", "import webbrowser; webbrowser.open('https://example.invalid/login')"], { stdio: ["ignore", "ignore", "inherit"] });
+      return;
+    }
+    if (process.env.FAKE_ACP_REQUIRE_AUTH) { fail(message.id, -32000, "authentication required"); return; }
     mcpServers = message.params.mcpServers;
     if (!Array.isArray(message.params?.mcpServers)) {
       fail(message.id, -32602, "mcpServers is required");

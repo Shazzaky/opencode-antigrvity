@@ -162,7 +162,7 @@ export class SessionPool {
 
   async *turn(request: SessionTurnRequest): AsyncGenerator<AcpEvent> {
     if (request.hostSessionID && await sessionStore.isHostDeleted(request.hostSessionID)) throw new AgyError("invalid_request", "This host session was deleted; late requests cannot recreate its execution state");
-    if (this.disposed) throw new AgyProcessError("The Antigravity session pool has been shut down");
+    if (this.disposed) throw new AgyError("invalid_request", "The Antigravity session pool has been shut down", { code: "agy_pool_closed", retryable: false });
     let entry = this.entries.get(request.key);
     if (!entry) {
       if (this.entries.size >= this.maxSessions) {
@@ -184,7 +184,7 @@ export class SessionPool {
     });
     try {
       await waitForPrevious(previous, signal);
-      if (this.disposed) throw new AgyProcessError("The Antigravity session pool has been shut down");
+      if (this.disposed) throw new AgyError("invalid_request", "The Antigravity session pool has been shut down", { code: "agy_pool_closed", retryable: false });
       if (signal.aborted) throw new AgyAbortError();
       const unlock = await sessionStore.lockTurn(ownershipKey(request.key, request.hostSessionID));
       try {

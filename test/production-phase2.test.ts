@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { useFixtureAuthentication } from "./fixtures/compatibility.js";
+useFixtureAuthentication();
 import { chmod, mkdtemp, open, readFile, unlink, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ContentBlock } from "@agentclientprotocol/sdk";

@@ -517,22 +517,37 @@ async function localRefreshModels(): Promise<AcpModelCatalog> {
   return runtime ? runtime.manager.refresh(true) : fallbackAcpModelCatalog();
 }
 
-type ProxyOwner = { refs: Map<string, number>; retain: typeof retainProxy; release: typeof releaseProxy; port: typeof localProxyPort; url: typeof localProxyBaseUrl; runtime: typeof localProxyRuntime; refresh: typeof localRefreshModels; listen: typeof localModelCatalogChange };
+type ProxyOwner = { lifecycle?: Promise<void>; refs: Map<string, number>; retain: typeof retainProxy; release: typeof releaseProxy; port: typeof localProxyPort; url: typeof localProxyBaseUrl; runtime: typeof localProxyRuntime; refresh: typeof localRefreshModels; listen: typeof localModelCatalogChange };
 const processOwner = globalThis as typeof globalThis & { __agyProxyV1?: ProxyOwner };
-const sharedProxy = processOwner.__agyProxyV1 ??= { refs: new Map(), retain: retainProxy, release: releaseProxy, port: localProxyPort, url: localProxyBaseUrl, runtime: localProxyRuntime, refresh: localRefreshModels, listen: localModelCatalogChange };
-export async function startProxy(directory = process.cwd()): Promise<number> {
-  const root = resolvePath(directory);
-  sharedProxy.refs.set(root, (sharedProxy.refs.get(root) ?? 0) + 1);
-  try { return await sharedProxy.retain(root); }
-  catch (error) { await stopProxy(root); throw error; }
+const sharedProxy: ProxyOwner = processOwner.__agyProxyV1 ??= { refs: new Map(), retain: retainProxy, release: releaseProxy, port: localProxyPort, url: localProxyBaseUrl, runtime: localProxyRuntime, refresh: localRefreshModels, listen: localModelCatalogChange };
+function serializeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+  const result = (sharedProxy.lifecycle ?? Promise.resolve()).then(operation);
+  sharedProxy.lifecycle = result.then(() => undefined, () => undefined);
+  return result;
 }
-export async function stopProxy(directory?: string): Promise<void> {
+
+async function releaseReference(directory?: string): Promise<void> {
   if (!directory) { sharedProxy.refs.clear(); return sharedProxy.release(); }
   const root = resolvePath(directory);
   const count = sharedProxy.refs.get(root) ?? 0;
+  if (!count) return;
   if (count > 1) { sharedProxy.refs.set(root, count - 1); return; }
   sharedProxy.refs.delete(root);
   await sharedProxy.release(root);
+}
+
+export function startProxy(directory = process.cwd()): Promise<number> {
+  const root = resolvePath(directory);
+  // Shutdown includes asynchronous catalog/worker cleanup. A replacement must
+  // not reopen the process-wide pool until that cleanup has fully completed.
+  return serializeLifecycle(async () => {
+    sharedProxy.refs.set(root, (sharedProxy.refs.get(root) ?? 0) + 1);
+    try { return await sharedProxy.retain(root); }
+    catch (error) { await releaseReference(root); throw error; }
+  });
+}
+export function stopProxy(directory?: string): Promise<void> {
+  return serializeLifecycle(() => releaseReference(directory));
 }
 export const getProxyPort = () => sharedProxy.port();
 export const getProxyBaseUrl = () => sharedProxy.url();

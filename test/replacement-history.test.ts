@@ -1,4 +1,8 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import { fixtureCompatibility } from "./fixtures/compatibility.js";
+let compatibility: ReturnType<typeof fixtureCompatibility>;
+beforeAll(() => { compatibility = fixtureCompatibility(); });
+afterAll(() => { compatibility.mockRestore(); });
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import * as acpProcess from "../src/acp-process.js";

@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { win32 } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Readable, Writable } from "node:stream";
 import {
@@ -15,13 +16,14 @@ import {
 import { AgyAbortError, AgyError, AgyProcessError, AgyProtocolError, AgyTimeoutError } from "./errors.js";
 import { DEFAULT_MAX_STDERR_BYTES, configuredPrintTimeoutMs, configuredTurnStallTimeoutMs, type AcpEffort } from "./constants.js";
 import { detectAcpServer, ensureAcpServer } from "./acp-detect.js";
-import { bridgeCliAuthentication } from "./auth-bridge.js";
+import { cliAuthenticationError, requireCliAuthentication } from "./auth-bridge.js";
 import { debug, info, warn } from "./log.js";
 import type { AcpEvent } from "./protocol.js";
 import { catalogFromSession, type AcpModelCatalog } from "./models.js";
 import { emitAcpCatalog } from "./catalog-events.js";
 import { hostEnvironment } from "./host-environment.js";
 import { assertHostToolCompatibility } from "./acp-compatibility.js";
+import { BLOCKED_BROWSER_MARKER, prepareBrowserBlocker } from "./browser-blocker.js";
 export type { AcpEvent } from "./protocol.js";
 
 export type AcpWorkerState = "created" | "starting" | "ready" | "turn_active" | "closing" | "closed" | "failed";
@@ -36,9 +38,6 @@ export type AcpWorkerOptions = {
   effort?: AcpEffort;
   sessionId?: string;
   mode?: "accept-edits" | "plan";
-  authMethod?: string;
-  skipSession?: boolean;
-  nonInteractive?: boolean;
   catalogScope?: string;
   printTimeoutMs?: number;
   stallTimeoutMs?: number;
@@ -171,7 +170,7 @@ function asAcpError(error: unknown, fallback: string): AgyError {
     return new AgyError("context_overflow", message, { code: "context_length_exceeded", details });
   }
   if (/auth|login|authenticate|credential/.test(lower)) {
-    return new AgyError("auth", `${message}. Authenticate the official ACP server with the provider auth action or OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD.`, { code: "agy_acp_auth", details });
+    return new AgyError("auth", `${message}. Sign in through the agy CLI, then retry; automatic login is disabled.`, { code: "agy_acp_auth", details });
   }
   if (/rate.?limit|too many requests/.test(lower)) return new AgyError("rate_limit", message, { code: "agy_acp_rate_limit", details });
   if (/quota|resource[ _]exhausted/.test(lower)) return new AgyError("quota", message, { code: "agy_acp_quota", details });
@@ -194,15 +193,18 @@ function isMissingSessionError(error: unknown): boolean {
   return /session.{0,200}not found|unknown session|invalid session|no such session|cannot load (?:stored )?session|method not found|session (?:cannot be resumed|is not resumable|has expired)|resume (?:is )?not supported/i.test(message);
 }
 
-function isAuthenticationRequired(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /authentication required|auth required|not authenticated|login required/i.test(message);
-}
-
 function terminateProcess(child: ChildProcess, force = false): void {
   const signal = force ? "SIGKILL" : "SIGTERM";
   try {
-    if (child.pid && process.platform !== "win32") process.kill(-child.pid, signal);
+    if (child.pid && process.platform === "win32") {
+      // The Windows PyInstaller launcher and its harness run as descendants;
+      // killing only the launcher leaves inference/login processes alive.
+      const taskkill = win32.join(process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows", "System32", "taskkill.exe");
+      execFile(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 }, error => {
+        if (error) { try { child.kill(signal); } catch { /* already exited */ } }
+      });
+    }
+    else if (child.pid) process.kill(-child.pid, signal);
     else child.kill(signal);
   } catch {
     try { child.kill(signal); } catch { /* already exited */ }
@@ -227,6 +229,8 @@ export class AcpWorker {
   private stderrDiagnostic = "";
   private actualModelValue?: string;
   private executionActivity = false;
+  private authenticationFailure?: AgyError;
+  private stderrTail = "";
 
   constructor(options: AcpWorkerOptions, executable: string) {
     this.options = { ...options };
@@ -260,16 +264,28 @@ export class AcpWorker {
     if (this.stateValue !== "created") throw new AgyProcessError(`Cannot start ACP worker from state ${this.stateValue}`);
     this.stateValue = "starting";
     try {
+      const environment = { ...process.env, ...this.options.environment };
+      const browser = await prepareBrowserBlocker(environment);
       const args = this.options.executableArgs ?? (await detectAcpServer(this.executable)).args;
       this.child = spawn(this.executable, args, {
         cwd: this.options.cwd,
-        env: { ...process.env, ...this.options.environment },
+        // ACP itself can launch OAuth from session/new or a failed refresh.
+        // Its Python webbrowser controller must never reach the real browser.
+        env: { ...environment, BROWSER: browser },
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: true,
       });
       const child = this.child as ChildProcessWithoutNullStreams;
       child.stderr.on("data", (chunk: Buffer | string) => {
+        const stderr = this.stderrTail + String(chunk);
+        this.stderrTail = stderr.slice(-512);
+        if (stderr.includes(BLOCKED_BROWSER_MARKER)) {
+          this.authenticationFailure = cliAuthenticationError();
+          this.turnEvents?.close(this.authenticationFailure);
+          this.connection?.close(this.authenticationFailure);
+          terminateProcess(child, true);
+        }
         if (this.stderrDiagnostic.length >= DEFAULT_MAX_STDERR_BYTES) return;
         this.stderrDiagnostic += (typeof chunk === "string" ? chunk : chunk.toString("utf8")).slice(0, DEFAULT_MAX_STDERR_BYTES - this.stderrDiagnostic.length);
       });
@@ -290,34 +306,16 @@ export class AcpWorker {
       const init = await this.withSignal(agent.request(methods.agent.initialize, {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: "opencode-antigravity", version: "0.6.0" },
+        clientInfo: { name: "opencode-antigravity", version: "0.6.1" },
       }), signal);
       this.initValue = init;
-      const authMethod = this.options.authMethod?.trim() || process.env.OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD?.trim();
-      if (authMethod && !this.options.nonInteractive) {
-        const advertised = init.authMethods?.find((method) => method.id === authMethod);
-        if (!advertised) throw new AgyError("auth", `The ACP server did not advertise authentication method "${authMethod}"`, { code: "agy_acp_auth_method" });
-        if ((advertised as { type?: unknown }).type === "terminal") throw new AgyError("unsupported", `Authentication method "${authMethod}" requires a terminal ACP flow`, { code: "agy_acp_terminal_auth" });
-        await this.withSignal(agent.request(methods.agent.authenticate, { methodId: authMethod }), signal);
-      }
-      if (!this.options.skipSession) {
-        try {
-          await this.openSession(agent, signal);
-        } catch (error) {
-          const explicitMethod = this.options.authMethod?.trim() || process.env.OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD?.trim();
-          if (explicitMethod || this.options.nonInteractive || !isAuthenticationRequired(error)) throw error;
-          const method = init.authMethods?.find((entry) => entry.id === "oauth-personal") ?? init.authMethods?.find((entry) => (entry as { type?: unknown }).type !== "terminal");
-          if (!method) throw error;
-          await this.withSignal(agent.request(methods.agent.authenticate, { methodId: method.id }), signal);
-          await this.openSession(agent, signal);
-        }
-      }
+      await this.openSession(agent, signal);
       this.stateValue = "ready";
       info("official Antigravity worker ready", { protocol: init.protocolVersion, session: Boolean(this.sessionIdValue) });
     } catch (error) {
       await this.stop(true);
       this.stateValue = "failed";
-      throw asAcpError(error, "The official Antigravity server could not be started");
+      throw this.authenticationFailure ?? asAcpError(error, "The official Antigravity server could not be started");
     }
   }
 
@@ -605,21 +603,19 @@ export class AcpWorker {
 }
 
 export async function createAcpWorker(options: AcpWorkerOptions, signal?: AbortSignal): Promise<AcpWorker> {
+  // CLI consumer credentials are the sole authentication source. Legacy ACP
+  // method overrides must not select another interactive login mechanism.
+  const environment = { ...process.env, ...options.environment };
+  await requireCliAuthentication(environment);
   const detection = options.executable
     ? { executable: options.executable, args: options.executableArgs }
     : await ensureAcpServer();
   if (options.hostTools) await assertHostToolCompatibility(detection.executable);
   if (options.hostTools) {
-    const isolated = await hostEnvironment({ ...process.env, ...options.environment,
-      ...(options.authMethod ? { OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD: options.authMethod } : {}) },
+    const isolated = await hostEnvironment(environment,
       options.catalogScope, options.utilityDirectory);
     options = { ...options, ...isolated };
   }
-  await bridgeCliAuthentication({
-    ...process.env,
-    ...options.environment,
-    ...(options.authMethod ? { OPENCODE_ANTIGRAVITY_ACP_AUTH_METHOD: options.authMethod } : {}),
-  });
   const worker = new AcpWorker({
     ...options,
     executableArgs: options.executableArgs ?? detection.args,

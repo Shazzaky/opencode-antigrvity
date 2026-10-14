@@ -6,7 +6,7 @@ afterAll(() => { compatibility.mockRestore(); });
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AntigravityPlugin, AUTH_METHOD_ID, INTEGRATION_ID, PLUGIN_ID } from "../src/index.js";
+import { AntigravityPlugin, INTEGRATION_ID, PLUGIN_ID } from "../src/index.js";
 import {
   DIRECTORY_HEADER,
   EFFORT_HEADER,
@@ -142,20 +142,6 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   expect(flash.limit).toEqual({ context: 1_048_576, output: 65_536 });
 
   expect(methods.some((method) => method.integrationID === PROVIDER_ID && method.method.type === "key")).toBe(true);
-  const auth = methods.find((method) => method.integrationID === INTEGRATION_ID && method.method.type === "oauth");
-  expect(auth.method).toMatchObject({ id: AUTH_METHOD_ID, type: "oauth" });
-  expect(auth.method.form[0].options.map((option: { value: string }) => option.value)).toContain("gemini-api-key");
-  const authorization = await auth.authorize({ method: "oauth-personal" });
-  expect(authorization.mode).toBe("auto");
-  const credential = await authorization.callback;
-  expect(credential).toMatchObject({
-    type: "oauth",
-    methodID: AUTH_METHOD_ID,
-    access: LOCAL_API_KEY,
-    refresh: LOCAL_API_KEY,
-  });
-  expect(JSON.stringify(credential)).not.toContain("access_token");
-  expect(JSON.stringify(credential)).not.toContain("refresh_token");
 
   for (const kind of ["context", "compaction", "generate", "title"]) {
     const hook = hooks.get(kind)!;
@@ -173,6 +159,9 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   const rejectedRetry = { ...retryEvent, decision: { retry: false } };
   await retry.callback(rejectedRetry);
   expect(rejectedRetry.decision).toEqual({ retry: false });
+  const closedPoolRetry = { error: { type: "api-error", message: "The Antigravity session pool has been shut down" }, decision: { retry: true, delay: 10 } };
+  await retry.callback(closedPoolRetry);
+  expect(closedPoolRetry.decision).toEqual({ retry: false });
   expect(modelRequest.options).toEqual({ providerID: PROVIDER_ID });
   const event = {
     sessionID: "session-v2",

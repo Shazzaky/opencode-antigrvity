@@ -26,7 +26,7 @@ test("host ACP isolates global MCP, hooks and workspaces while retaining authent
     expect((await stat(join(auth, "acp_token.json"))).mode & 0o777).toBe(0o600);
     await rm(join(source, "antigravity-acp/acp_token.json"));
     const changed = await hostEnvironment(options, "account-a");
-    expect(changed.environment.GEMINI_HOME).not.toBe(a.environment.GEMINI_HOME);
+    expect(changed.environment.GEMINI_HOME).toBe(a.environment.GEMINI_HOME);
     expect(await readdir(join(changed.environment.GEMINI_HOME, "antigravity-acp"))).not.toContain("acp_token.json");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

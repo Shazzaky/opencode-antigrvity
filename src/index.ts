@@ -11,8 +11,6 @@ import {
   REQUEST_KIND_HEADER,
   SESSION_HEADER,
 } from "./constants.js";
-import { createAcpWorker } from "./acp-process.js";
-import { ensureAcpServer } from "./acp-detect.js";
 import { refreshModelMetadata, researchedMetadataFor } from "./model-metadata.js";
 import { fallbackAcpModelCatalog, type AcpModel, type AcpModelCatalog } from "./models.js";
 import { getProxyBaseUrl, getProxyRuntime, onModelCatalogChange, startProxy, stopProxy } from "./proxy.js";
@@ -27,16 +25,7 @@ import { warn, info as lifecycleInfo } from "./log.js";
 
 export const PLUGIN_ID = "opencode-antigravity";
 export const INTEGRATION_ID = PROVIDER_ID;
-export const AUTH_METHOD_ID = "antigravity-acp";
 const PROVIDER_PACKAGE = "@opencode/ai/providers/anthropic";
-const AUTH_REGISTRY_URL = "https://github.com/agentclientprotocol/registry/tree/main/antigravity-acp";
-
-const AUTH_METHODS = [
-  { value: "oauth-personal", label: "Personal Google account", description: "Sign in with a personal Google account" },
-  { value: "oauth-business", label: "Gemini Enterprise", description: "Sign in with a Gemini Enterprise account" },
-  { value: "gemini-api-key", label: "Gemini API key", description: "Enter the key through the official ACP server" },
-  { value: "agent-platform", label: "Agent Platform", description: "Use ADC or an Agent Platform key" },
-] as const;
 
 async function retainWorkspace(directory: string): Promise<string> {
   const root = resolvePath(directory);
@@ -73,47 +62,6 @@ function providerModel(model: AcpModel): Model.Info {
 
 export function buildProviderModels(catalog: AcpModelCatalog): Model.Info[] {
   return catalog.models.map(providerModel);
-}
-
-async function authorizeAcp(directory: string, answer: Record<string, unknown>) {
-  const requested = answer.method;
-  const method = AUTH_METHODS.some((item) => item.value === requested)
-    ? requested as (typeof AUTH_METHODS)[number]["value"]
-    : "oauth-personal";
-  const detection = await ensureAcpServer();
-  const callback = (async () => {
-    const worker = await createAcpWorker({
-      cwd: directory,
-      executable: detection.executable,
-      executableArgs: detection.args,
-      authMethod: method,
-      skipSession: true,
-    });
-    try {
-      // OpenCode receives only a synthetic local proxy credential. ACP owns all
-      // Google authentication and credential persistence.
-      return {
-        type: "oauth" as const,
-        methodID: Integration.MethodID.make(AUTH_METHOD_ID),
-        access: LOCAL_API_KEY,
-        refresh: LOCAL_API_KEY,
-        expires: Number.MAX_SAFE_INTEGER,
-        metadata: { source: PLUGIN_ID, authMethod: method },
-      };
-    } finally {
-      await worker.stop(true);
-    }
-  })();
-
-  return {
-    // ACP owns the actual provider URL; V2's OAuth contract still needs a
-    // navigable link, so point the client at the official ACP registry entry.
-    url: AUTH_REGISTRY_URL,
-    instructions:
-      "The official Antigravity server performs sign-in and stores its credentials locally. OpenCode stores only the fixed loopback proxy marker; never paste a Google credential into OpenCode.",
-    mode: "auto" as const,
-    callback,
-  };
 }
 
 function requestKind(kind: string): string {
@@ -203,31 +151,13 @@ export const AntigravityPlugin = Plugin.define({
         editor.update(INTEGRATION_ID, (integration) => {
           integration.name = PROVIDER_NAME;
         });
-        editor.method.update({
-          integrationID: INTEGRATION_ID,
-          method: {
-            id: AUTH_METHOD_ID,
-            type: "oauth",
-            label: "Sign in with Antigravity",
-            form: [{
-              key: "method",
-              type: "string",
-              title: "Antigravity authentication method",
-              description: "The selected method is handled by the official ACP server, not OpenCode.",
-              required: true,
-              default: "oauth-personal",
-              options: AUTH_METHODS.map(({ value, label, description }) => ({ value, label, description })),
-            }],
-          },
-          authorize: (answer) => authorizeAcp(ctx.location.directory, answer),
-        });
         // This is a local adapter, not a Google API-key provider. Keep the
         // integration ID equal to the provider ID for clients such as OpenChamber.
         editor.method.update({ integrationID: INTEGRATION_ID, method: { type: "key", label: "Local Antigravity" } });
       });
 
       // Match V1: install the non-secret loopback marker automatically. Google
-      // authentication stays in the CLI/ACP worker; no user-facing connect flow.
+      // authentication comes only from the already-authenticated agy CLI.
       const connection = await ctx.integration.connection.active(INTEGRATION_ID);
       const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined;
       if (credential?.type !== "key" || credential.key !== LOCAL_API_KEY) {
@@ -303,6 +233,12 @@ export const AntigravityPlugin = Plugin.define({
 
       await ctx.session.hook("retry", event => {
         if (!event.decision.retry) return;
+        // Older adapter instances reported a permanently closed pool as 502.
+        // Repeating that request cannot revive its runtime; never loop on it.
+        if (event.error.message.includes("The Antigravity session pool has been shut down")) {
+          event.decision = { retry: false };
+          return;
+        }
         // Mid-stream Anthropic errors have no HTTP Retry-After header. V2
         // retains the raw provider body on SessionError, so honor our normalized
         // seconds hint here without changing the host's retry eligibility.
