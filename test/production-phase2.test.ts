@@ -5,7 +5,7 @@ import { chmod, mkdtemp, open, readFile, unlink, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 import { MAX_ATTACHMENT_BYTES, MAX_MEDIA_BYTES, materializeMedia, mediaBytes, validateMediaBlocks } from "../src/attachments.js";
-import { blockBudget, HISTORY_OMISSION } from "../src/budget.js";
+import { blockBudget, HISTORY_OMISSION, TRANSCRIPT_INPUT_BYTE_CAP } from "../src/budget.js";
 import { messageContentToAcp, hostResultMessageToAcp, normalizePrompt } from "../src/prompt.js";
 import { reconstruct, type ReconstructionGroup } from "../src/reconstruction.js";
 import { hostResults } from "../src/host-tools.js";
@@ -71,8 +71,9 @@ test("optional selection reserves the same headroom as final fixed admission", (
   expect(text(sent)).toContain("NOW");
   expect(text(sent)).toContain(HISTORY_OMISSION);
   expect(() => blockBudget("unknownmodel", sent)).not.toThrow();
-  // A larger model still independently reserves text-transport headroom.
-  const large = reconstruct([group("X".repeat(98900)), group("NOW", true)], "", "gemini-3.8-flash", 100000);
+  // A larger model still independently reserves adapter/model headroom.
+  const large = reconstruct([group("X".repeat(TRANSCRIPT_INPUT_BYTE_CAP - 1100)), group("NOW", true)], "", "gemini-3.8-flash", TRANSCRIPT_INPUT_BYTE_CAP);
+  expect(text(large)).toContain(HISTORY_OMISSION);
   expect(() => blockBudget("gemini-3.8-flash", large)).not.toThrow();
   const empty = [{ type: "text" as const, text: "" }];
   const exact = "X".repeat(blockBudget("unknownmodel", empty).context - 1024);

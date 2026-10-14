@@ -1,8 +1,8 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { AgyError } from "./errors.js";
+import { geminiHome, resolveCliRefreshToken } from "./cli-credentials.js";
 
 export function cliAuthenticationError(): AgyError {
   return new AgyError("auth", "Antigravity requires an authenticated agy CLI. Sign in through agy, then retry. The plugin does not start interactive login.", { code: "agy_cli_auth_required" });
@@ -33,19 +33,6 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/aicode",
 ];
 
-type CliTokenFile = {
-  auth_method?: string;
-  token?: {
-    access_token?: unknown;
-    refresh_token?: unknown;
-    expiry?: unknown;
-  };
-};
-
-function geminiHome(environment: NodeJS.ProcessEnv): string {
-  return environment.GEMINI_HOME?.trim() || join(environment.HOME?.trim() || homedir(), ".gemini");
-}
-
 async function readObject(path: string): Promise<Record<string, any>> {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
@@ -73,30 +60,21 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
  */
 export async function bridgeCliAuthentication(environment: NodeJS.ProcessEnv = process.env): Promise<boolean> {
   const home = geminiHome(environment);
-  // Official CLI credential directory, independent of our provider ID.
-  const cliPath = join(home, "antigravity-cli", "antigravity-oauth-token");
   const acpDir = join(home, "antigravity-acp");
   const acpPath = join(acpDir, "acp_token.json");
   const settingsPath = join(acpDir, "settings.json");
-  let cli: CliTokenFile;
-  try {
-    cli = JSON.parse(await readFile(cliPath, "utf8")) as CliTokenFile;
-  } catch {
-    return false;
-  }
-  const token = cli?.token;
-  if (typeof token?.refresh_token !== "string" || !token.refresh_token.trim()) return false;
-  if (cli.auth_method && cli.auth_method !== "consumer" && cli.auth_method !== "oauth-personal") return false;
+  const refreshToken = await resolveCliRefreshToken(environment);
+  if (!refreshToken) return false;
   const settings = await readObject(settingsPath);
   const auth = settings.auth && typeof settings.auth === "object" ? settings.auth : {};
   const existing = await readObject(acpPath);
-  if (existing.refresh_token !== token.refresh_token || existing.client_id !== OAUTH_CLIENT_ID ||
+  if (existing.refresh_token !== refreshToken || existing.client_id !== OAUTH_CLIENT_ID ||
       existing.client_secret !== OAUTH_CLIENT_SECRET || existing.token_uri !== OAUTH_TOKEN_URI ||
       "token" in existing || "expiry" in existing) {
     const credentials = {
       client_id: OAUTH_CLIENT_ID,
       client_secret: OAUTH_CLIENT_SECRET,
-      refresh_token: token.refresh_token,
+      refresh_token: refreshToken,
       token_uri: OAUTH_TOKEN_URI,
       scopes: OAUTH_SCOPES,
       // Let Google's credential loader refresh. CLI expiry timestamps and
