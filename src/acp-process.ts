@@ -309,7 +309,7 @@ export class AcpWorker {
       const init = await this.withSignal(agent.request(methods.agent.initialize, {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: "opencode-antigravity", version: "0.6.1" },
+        clientInfo: { name: "opencode-antigravity", version: "0.6.2" },
       }), signal);
       this.initValue = init;
       await this.openSession(agent, signal);
