@@ -56,10 +56,19 @@ test("capacity evicts completed idle workers and never evicts active work", asyn
     expect((await pool.status("capacity-completed")).workerState).toBe("none");
     // Use a fresh logical request identity rather than replaying its completion.
     const pending = pool.turn({ key: "capacity-active", prompt: [{ type: "text", text: "FAKE_HANG" }], settings, requestId: "new-active" }).next();
-    await Bun.sleep(30);
+    // Observe rejection immediately: closing the pool may reject before close()
+    // itself returns. Wait for the actual turn, not a worker-startup time guess.
+    const outcome = pending.then(value => ({ value }), error => ({ error }));
+    const deadline = Date.now() + 5_000;
+    while ((await pool.status("capacity-active")).workerState !== "turn_active") {
+      if (Date.now() >= deadline) throw new Error("Capacity test worker did not enter its hanging turn");
+      await Bun.sleep(5);
+    }
+    expect((await pool.status("capacity-active")).active).toBe(true);
     await expect(turn("capacity-blocked", "hi").next()).rejects.toThrow(/session limit/);
+    expect((await pool.status("capacity-active")).workerState).toBe("turn_active");
     await pool.close();
-    await expect(pending).rejects.toThrow();
+    expect(await outcome).toMatchObject({ error: { code: "agy_cancelled" } });
   } finally {
     await pool.close();
     if (oldCapacity === undefined) delete process.env.OPENCODE_ANTIGRAVITY_MAX_SESSIONS; else process.env.OPENCODE_ANTIGRAVITY_MAX_SESSIONS = oldCapacity;

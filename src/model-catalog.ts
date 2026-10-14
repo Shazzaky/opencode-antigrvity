@@ -11,6 +11,11 @@ import { effectiveAuth } from "./effective-auth.js";
 
 export type CatalogContext = { scope: string; executable: string; args: string[]; cacheDirectory: string };
 
+/** Windows cold discovery can exceed one minute; keep every probe bounded. */
+export function discoveryTimeoutMs(platform = process.platform): number {
+  return platform === "win32" ? 120_000 : 45_000;
+}
+
 async function jsonFile(path: string): Promise<Record<string, any>> {
   let raw: string | undefined;
   try {
@@ -117,7 +122,7 @@ export class ModelCatalog {
       // Retry failed discovery at most once a minute, even on busy workspaces.
       if (!force && !changed && Date.now() - this.lastAttempt < Math.min(ttl, 60_000)) return this.catalog;
       this.lastAttempt = Date.now();
-      const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(45_000)]);
+      const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(discoveryTimeoutMs())]);
       const catalog = await (this.options.probe ?? probe)(context, this.directory, signal);
       const latest = await (this.options.context ?? catalogContext)();
       if (!this.closed && latest.scope === context.scope) { this.adopt(catalog); this.lastError = undefined; }
