@@ -1,10 +1,11 @@
 import { AgyError } from "./errors.js";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 import { researchedMetadataFor } from "./model-metadata.js";
-import { DEFAULT_HISTORY_MAX_CHARS } from "./constants.js";
+import { DEFAULT_HISTORY_MAX_CHARS, envNumber } from "./constants.js";
 import { warn } from "./log.js";
 import { IMAGE_CONTEXT_ESTIMATE } from "./attachments.js";
-export const TRANSCRIPT_INPUT_BYTE_CAP = 100_000;
+// 100k fails tool-heavy setups (big AGENTS.md + MCP schemas) with agy_context_budget.
+export const TRANSCRIPT_INPUT_BYTE_CAP = envNumber("OPENCODE_ANTIGRAVITY_FIXED_INPUT_CAP", 1_000_000, 16_384);
 export const FIXED_BUDGET_HEADROOM = 1024;
 
 export function historyCharacterLimit(): number {
