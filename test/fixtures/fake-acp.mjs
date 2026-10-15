@@ -76,7 +76,19 @@ async function handlePrompt(message) {
     if (!url) { fail(id, -32603, "Missing MCP bridge"); return; }
     const rpc = async (method, params = {}) => (await (await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: nextRequestId++, method, params }) })).json());
-    await rpc("initialize", { protocolVersion: "2025-03-26" });
+    const initialized = await rpc("initialize", { protocolVersion: "2025-03-26" });
+    if (initialized.result?.serverInfo?.name !== mcpServers[0].name) { fail(id, -32603, "MCP server identity mismatch"); return; }
+    if (text.includes("FAKE_MCP_PERMISSION")) {
+      const permission = await request("session/request_permission", {
+        sessionId,
+        toolCall: { toolCallId: "mcp-permission", title: "Execute external tool", kind: "execute", status: "pending", _meta: { mcp: { server: mcpServers[0].name } } },
+        options: [
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ],
+      });
+      if (permission?.outcome?.optionId !== "allow") { fail(id, -32603, "MCP permission denied"); return; }
+    }
     const list = await rpc("tools/list");
     const name = list.result.tools[0].name;
     if (text.includes("FAKE_MCP_ACTIVITY")) {
@@ -184,6 +196,7 @@ const input = readline.createInterface({ input: process.stdin, crlfDelay: Infini
 input.on("line", (line) => {
   let message;
   try { message = JSON.parse(line); } catch { process.exit(1); }
+  if (process.env.FAKE_ACP_RPC_LOG && message.method) fs.appendFileSync(process.env.FAKE_ACP_RPC_LOG, JSON.stringify(message) + "\n");
   if (message?.id !== undefined && message?.result !== undefined && pending.has(message.id)) {
     pending.get(message.id)(message.result);
     pending.delete(message.id);

@@ -27,7 +27,7 @@ const fixture = join(import.meta.dir, "fixtures", "fake-acp.mjs");
 const temporaryDirectories: string[] = [];
 const cleanupTasks: Array<() => Promise<void>> = [];
 const savedEnvironment = new Map<string, string | undefined>();
-const environmentKeys = ["OPENCODE_ANTIGRAVITY_ACP_PATH", "OPENCODE_ANTIGRAVITY_DATA_DIR", "GEMINI_HOME", "OPENCODE_ANTIGRAVITY_MODELS_DEV", "FAKE_ACP_PROMPT_LOG"];
+const environmentKeys = ["OPENCODE_ANTIGRAVITY_ACP_PATH", "OPENCODE_ANTIGRAVITY_DATA_DIR", "GEMINI_HOME", "OPENCODE_ANTIGRAVITY_MODELS_DEV", "FAKE_ACP_PROMPT_LOG", "FAKE_ACP_RPC_LOG"];
 
 afterEach(async () => {
   await Promise.all(cleanupTasks.splice(0).map((cleanup) => cleanup()));
@@ -57,6 +57,7 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   process.env.GEMINI_HOME = geminiHome;
   process.env.OPENCODE_ANTIGRAVITY_MODELS_DEV = "0";
   process.env.FAKE_ACP_PROMPT_LOG = join(root, "event-prompts.jsonl");
+  process.env.FAKE_ACP_RPC_LOG = join(root, "rpc.jsonl");
   await chmod(fixture, 0o755);
 
   const providers: any[] = [];
@@ -70,7 +71,13 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   const processedEvents = new Set<string>();
   const hostModels = new Map<string, any>();
   const hostModelUpdates: any[] = [];
+  let configuredSystem: string | undefined = "Search carefully. Do not write files.";
+  let agentLookupFailure = false;
   const context = {
+    agent: { get: async ({ agentID }: { agentID: string }) => {
+      if (agentLookupFailure) throw new Error("Agent lookup failed");
+      return { data: { id: agentID, system: configuredSystem } };
+    } },
     event: { subscribe: ({ signal }: { signal: AbortSignal }) => {
       const queue = new AsyncEventQueue<any>(); subscriptions.push(queue);
       signal.addEventListener("abort", () => queue.close(), { once: true });
@@ -183,6 +190,57 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   expect(event.headers).not.toHaveProperty("authorization");
   expect(event.headers).not.toHaveProperty(MESSAGE_HEADER);
 
+  const httpRequest = hooks.get("http.request")!;
+  expect(httpRequest.options).toEqual({ providerID: PROVIDER_ID });
+  const sendPure = async (sessionID: string, messages: unknown[]) => {
+    const routed = { ...event, sessionID, headers: {} };
+    await modelRequest.callback(routed);
+    const outgoing = { ...routed, request: new Request(routed.baseURL + "/messages", {
+      method: "POST", headers: { ...routed.headers, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gemini-3.8-flash", system: "GENERATED_SKILLS_AGENTS_ENV", messages, tools: [] }),
+    }) };
+    await httpRequest.callback(outgoing);
+    const response = await fetch(outgoing.request);
+    expect(response.status).toBe(200);
+    return response.json();
+  };
+  const intro = "You are a subagent spawned by another session.\nFirst task";
+  const pureMessages = [{ role: "user", content: intro }];
+  const firstPure = await sendPure("pure-system", pureMessages);
+  const promptLog = async () => (await readFile(process.env.FAKE_ACP_PROMPT_LOG!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  expect((await promptLog()).at(-1).prompt).toEqual([
+    { type: "text", text: "<instruction>\nSearch carefully. Do not write files.\n</instruction>" },
+    { type: "text", text: intro },
+  ]);
+  const binding = async (id: string) => (await sessionStore.entries()).find(([, record]) => record.conversation?.hostSessionID === id)![1];
+  const beforeContinue = await binding("pure-system");
+  const continuation = [...pureMessages, { role: "assistant", content: firstPure.content }, { role: "user", content: "Continue the task" }];
+  await sendPure("pure-system", continuation);
+  expect((await promptLog()).at(-1).prompt).toEqual([
+    { type: "text", text: "<instruction>\nSearch carefully. Do not write files.\n</instruction>" },
+    { type: "text", text: "Continue the task" },
+  ]);
+  expect((await binding("pure-system")).sessionId).toBe(beforeContinue.sessionId);
+  for (const [index, system] of ["", " \n\t", undefined].entries()) {
+    configuredSystem = system;
+    await sendPure(`empty-system-${index}`, pureMessages);
+    expect((await promptLog()).at(-1).prompt).toEqual([{ type: "text", text: intro }]);
+  }
+  // Clearing a configured system must retire the remote instructions as well.
+  await sendPure("pure-system", [...continuation, { role: "user", content: "Continue without instructions" }]);
+  expect((await binding("pure-system")).sessionId).not.toBe(beforeContinue.sessionId);
+  expect(JSON.stringify((await promptLog()).at(-1).prompt)).not.toContain("Search carefully");
+  expect(JSON.stringify((await promptLog()).at(-1).prompt)).not.toContain("GENERATED_SKILLS");
+  agentLookupFailure = true;
+  const lookupRequest = { ...event, request: new Request("http://localhost/messages", { method: "POST", body: "{}" }) };
+  await expect(httpRequest.callback(lookupRequest)).rejects.toThrow("Agent lookup failed");
+  agentLookupFailure = false;
+
+  const rpcLog = (await readFile(process.env.FAKE_ACP_RPC_LOG!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const initialize = rpcLog.filter(rpc => rpc.method === "initialize");
+  expect(initialize.length).toBeGreaterThan(0);
+  for (const rpc of initialize) expect(rpc.params).toEqual({ protocolVersion: 1, clientCapabilities: {} });
+
   const titleEvent = { ...event, kind: "title", headers: {} };
   await modelRequest.callback(titleEvent);
   expect(titleEvent.headers[REQUEST_KIND_HEADER]).toBe("title");
@@ -216,11 +274,14 @@ test("V2 setup registers provider models, integration auth, request hook, and cl
   await waitEvent(committed.id);
   const toolEvent = { ...event, sessionID: "deduplication-host", headers: {} };
   await modelRequest.callback(toolEvent);
-  const toolMessages: any[] = [{ role: "user", content: "FAKE_MCP DUPLICATE_EVENT_NEW_WORK" }];
+  const toolMessages: any[] = [{ role: "user", content: "FAKE_MCP_PERMISSION DUPLICATE_EVENT_NEW_WORK" }];
   const tools = [{ name: "shell", input_schema: { type: "object", properties: { index: { type: "integer" } } } }];
   const sendTools = () => fetch(toolEvent.baseURL + "/messages", { method: "POST", headers: { ...toolEvent.headers, "content-type": "application/json" }, body: JSON.stringify({ model: "gemini-3.8-flash", messages: toolMessages, tools }) });
   const parked = await (await sendTools()).json();
   expect(parked.stop_reason).toBe("tool_use");
+  const toolRpcLog = (await readFile(process.env.FAKE_ACP_RPC_LOG!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const toolSession = toolRpcLog.find(rpc => rpc.method === "session/new" && rpc.params.mcpServers.length);
+  expect(toolSession.params.mcpServers[0].name).toBe("external_tool");
   const call = parked.content.find((part: any) => part.type === "tool_use");
   const parkedBinding = (await sessionStore.entries()).find(([, record]) => record.conversation?.hostSessionID === "deduplication-host")!;
   subscriptions[0].push({ id: "evt_compaction_started", type: "session.compaction.started", data: { sessionID: "deduplication-host" } });

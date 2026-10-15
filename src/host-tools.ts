@@ -4,7 +4,7 @@ import { AgyAbortError, AgyBusyError, AgyError } from "./errors.js";
 import { sessionPool, type SessionSettings, type SessionTurnRequest } from "./session-pool.js";
 import type { AcpEvent } from "./protocol.js";
 import { extractTextContent, messageContentToAcp, normalizePrompt, type HostMessage } from "./prompt.js";
-import { envNumber } from "./constants.js";
+import { envNumber, HOST_MCP_SERVER_NAME } from "./constants.js";
 import { sessionStore } from "./session-store.js";
 import { canonical } from "./coordinator.js";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
@@ -79,15 +79,9 @@ export function hostResults(messages: unknown): Map<string, ToolResult> {
   return result;
 }
 
-export function hostInstructions(system: unknown, cwd: string): string {
-  return [
-    "<opencode-agent-instructions>",
-    "OpenCode owns tool execution and permissions. Use only the opencode MCP tools advertised for this turn.",
-    "The ACP working directory is private adapter storage. The actual task workspace is: " + cwd,
-    "Follow the host's agent and project instructions below for the current task:",
-    extractTextContent(system),
-    "</opencode-agent-instructions>",
-  ].join("\n");
+export function hostInstructions(system: unknown): string {
+  const text = extractTextContent(system);
+  return text.trim() ? `<instruction>\n${text}\n</instruction>` : "";
 }
 
 // Reloaded modules must keep live MCP waiters and endpoint tokens together.
@@ -208,13 +202,14 @@ export class HostBridge {
       }
       const tools = parseHostTools(input.tools);
       const signature = profile(tools, input.settings);
+      const nextInstructions = hostInstructions(input.system);
       if (this.active) {
         // Only this batch is operative. Admit its accumulated partial results
         // before persistence, not unrelated historical/settled result groups.
         validateMediaBlocks([...this.reported].flatMap(id => (results.get(id) ?? this.pending.get(id)?.result)?.content ?? []) as ContentBlock[]);
       }
-      if (this.active && signature !== this.signature) {
-        // Accept under the originating profile before retiring its waiter. The
+      if (this.active && (signature !== this.signature || nextInstructions !== this.instructions)) {
+        // Accept under the originating profile/instructions before retiring its waiter. The
         // replacement prompt imports host calls/results; it never reissues them.
         for (const id of results.keys()) if (!this.reported.has(id) && !this.settled.has(id)) throw new AgyError("invalid_request", "Tool result does not belong to this session's pending calls");
         for (const [id, result] of results) await sessionStore.saveToolResult(this.key, id, result);
@@ -233,8 +228,8 @@ export class HostBridge {
         if (this.turn?.messages && Array.isArray(input.messages)) this.turn.messages.splice(0, this.turn.messages.length, ...input.messages);
         if (this.turn?.responseCursor) this.turn.responseCursor.start = this.turn.responseCursor.events;
         if (this.reported.size && [...this.reported].every((id) => this.pending.get(id)?.result)) {
-          const nextInstructions = hostInstructions(input.system, this.cwd);
-          // Preserve instruction changes and user steering without starting a second ACP prompt.
+          // Instruction/profile changes rebuild above. Deliver user steering
+          // alongside the original tool results on an unchanged parked turn.
           const trailing: HostMessage[] = [];
           if (Array.isArray(input.messages)) for (let i = input.messages.length - 1; i >= 0; i--) {
             if (input.messages[i]?.role === "assistant") break;
@@ -249,8 +244,7 @@ export class HostBridge {
             const promoted = promotedImages(m.content);
             steering.push(...await messageContentToAcp(Array.isArray(m.content) ? m.content.filter((p: any) => p?.type !== "tool_result" && !promoted.has(p)) : m.content, [this.cwd], steeringBudget));
           }
-          const append = nextInstructions !== this.instructions ? nextInstructions : "";
-          const delivery = [...deliveryContent, ...steering, ...(append ? [{ type: "text" as const, text: append }] : [])];
+          const delivery = [...deliveryContent, ...steering];
           validateMediaBlocks(delivery);
           blockBudget(input.settings.model, delivery, input.settings.outputBudget);
           const last = [...this.reported].at(-1);
@@ -259,7 +253,6 @@ export class HostBridge {
           for (const id of this.reported) {
             const pending = this.pending.get(id)!;
             const result = structuredClone(pending.result!);
-            if (id === last && append) result.content.push({ type: "text", text: append });
             if (id === last) result.content.push(...steering as Record<string, unknown>[]);
             await sessionStore.toolDelivery(this.key, id, "delivery-attempted");
             localDeliveries.set(result, { key: this.key, id });
@@ -322,11 +315,11 @@ export class HostBridge {
         this.queue = new AsyncEventQueue<Wake>(); this.controller = new AbortController();
         this.settled.clear(); this.reported.clear(); this.active = true;
         this.callCount = 0;
-        this.instructions = hostInstructions(input.system, this.cwd);
+        this.instructions = hostInstructions(input.system);
         const schema = createHash("sha256").update(JSON.stringify(tools)).digest("hex");
         this.catalogID = schema;
         const settings: SessionSettings = { ...input.settings, hostTools: true,
-          mcpServers: tools.length ? [{ type: "http", name: "opencode", url: `${input.baseURL}/mcp/${this.token}/${schema}`, headers: [] }] : [],
+          mcpServers: tools.length ? [{ type: "http", name: HOST_MCP_SERVER_NAME, url: `${input.baseURL}/mcp/${this.token}/${schema}`, headers: [] }] : [],
           waitingForTools: () => this.waiting, hasToolActivity: () => this.callCount > 0 };
         const turn: SessionTurnRequest = { key: this.key, requestId: input.requestId, prompt: normalized.blocks,
           messages: normalized.messages, hostSessionID: this.sessionID,
@@ -433,7 +426,7 @@ export async function handleHostMcp(request: Request): Promise<Response> {
       return new Response(null, { status: 202 });
     }
     let result: unknown;
-    if (rpc.method === "initialize") result = { protocolVersion: ["2025-06-18", "2025-03-26", "2024-11-05"].includes(rpc.params?.protocolVersion) ? rpc.params.protocolVersion : "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "opencode", version: "1" } };
+    if (rpc.method === "initialize") result = { protocolVersion: ["2025-06-18", "2025-03-26", "2024-11-05"].includes(rpc.params?.protocolVersion) ? rpc.params.protocolVersion : "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: HOST_MCP_SERVER_NAME, version: "1" } };
     else if (rpc.method === "ping") result = {};
     else if (rpc.method === "tools/list") result = { tools: bridge.tools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.input_schema })) };
     else if (rpc.method === "tools/call") {

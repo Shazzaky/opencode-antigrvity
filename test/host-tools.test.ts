@@ -36,6 +36,22 @@ const send = (session: string, messages: any[], extra: Record<string, unknown> =
 });
 const result = (id: string, text: string, is_error = false) => ({ type: "tool_result", tool_use_id: id, content: text, is_error });
 
+test("plain proxy requests emit only configured instructions and user content", async () => {
+  for (const system of ["Search only", ""]) {
+    const response = await fetch(getProxyBaseUrl() + "/messages", {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": "opencode-antigravity-local" },
+      body: JSON.stringify({ model: "gemini-3.8-flash", system, messages: [{ role: "user", content: "Plain task" }] }),
+    });
+    expect(response.status).toBe(200);
+    await response.json();
+    const logged = JSON.parse((await readFile(join(directory, "prompts.jsonl"), "utf8")).trim().split("\n").at(-1)!);
+    expect(logged.prompt).toEqual([
+      ...(system ? [{ type: "text", text: "<instruction>\nSearch only\n</instruction>" }] : []),
+      { type: "text", text: "Plain task" },
+    ]);
+  }
+});
+
 /** These scenarios require a two-call batch, not the bridge's best-effort
  * 25 ms arrival grouping. Finish both durable writes before either wakes it. */
 async function sendParallel(session: string, messages: any[]): Promise<Response> {
@@ -457,7 +473,7 @@ test("quota rejection evidence cannot erase already emitted and completed host c
   expect(logged.filter(entry => entry.text.includes("FAKE_MCP_QUOTA"))).toHaveLength(1);
 });
 
-test("waiting for host approval suspends the ACP stall watchdog and forwards changed instructions", async () => {
+test("waiting for host approval suspends the watchdog; changed instructions rebuild with results and steering", async () => {
   const previous = process.env.OPENCODE_ANTIGRAVITY_TURN_STALL_MS;
   process.env.OPENCODE_ANTIGRAVITY_TURN_STALL_MS = "1000";
   try {
@@ -468,7 +484,31 @@ test("waiting for host approval suspends the ACP stall watchdog and forwards cha
     messages.push({ role: "assistant", content: first.content }, { role: "user", content: [result(first.content[0].id, "APPROVED"), { type: "text", text: "USER_STEERING" }] });
     const final = await (await send("waiting", messages, { system: "UPDATED_INSTRUCTIONS" })).json();
     expect(final.stop_reason).toBe("end_turn");
-    expect(JSON.stringify(final)).toContain("UPDATED_INSTRUCTIONS");
-    expect(JSON.stringify(final)).toContain("USER_STEERING");
+    const logged = JSON.parse((await readFile(join(directory, "prompts.jsonl"), "utf8")).trim().split("\n").at(-1)!);
+    expect(logged.prompt[0]).toEqual({ type: "text", text: "<instruction>\nUPDATED_INSTRUCTIONS\n</instruction>" });
+    expect(logged.text).toContain("USER_STEERING");
+    expect(logged.text).toContain("APPROVED");
+    expect(logged.text).not.toContain("HOST_INSTRUCTIONS_UNTRUNCATED");
+    expect(final.content.some((part: { type: string }) => part.type === "tool_use")).toBe(false);
   } finally { if (previous === undefined) delete process.env.OPENCODE_ANTIGRAVITY_TURN_STALL_MS; else process.env.OPENCODE_ANTIGRAVITY_TURN_STALL_MS = previous; }
+});
+
+test("clearing instructions during a parked tool turn rebuilds without old instructions or reexecuting tools", async () => {
+  const messages: any[] = [{ role: "user", content: "FAKE_MCP" }];
+  const first = await (await send("clear-parked-system", messages)).json();
+  expect(first.stop_reason).toBe("tool_use");
+  const [key, before] = (await sessionStore.entries()).find(([, record]) => record.conversation?.hostSessionID === "clear-parked-system")!;
+  const call = first.content.find((part: { type: string }) => part.type === "tool_use");
+  messages.push({ role: "assistant", content: first.content }, { role: "user", content: [result(call.id, "ORIGINAL_RESULT")] });
+  const final = await (await send("clear-parked-system", messages, { system: "" })).json();
+  expect(final.stop_reason).toBe("end_turn");
+  expect(final.content.some((part: { type: string }) => part.type === "tool_use")).toBe(false);
+  const after = await sessionStore.get(key);
+  expect(after?.sessionId).not.toBe(before.sessionId);
+  expect(after?.conversation?.instructions).toBe("");
+  const logged = JSON.parse((await readFile(join(directory, "prompts.jsonl"), "utf8")).trim().split("\n").at(-1)!);
+  expect(logged.text).toContain("ORIGINAL_RESULT");
+  expect(logged.text).not.toContain("HOST_INSTRUCTIONS_UNTRUNCATED");
+  expect(logged.text).not.toContain("<instruction>");
+  expect((await sessionStore.toolCall(key, call.id))?.resultDigest).toBeString();
 });

@@ -21,6 +21,7 @@ import { sessionPool } from "./session-pool.js";
 import { ContextTelemetry } from "./telemetry-rpc.js";
 import { onContextSnapshot, readContextSnapshot, markContextStale } from "./telemetry.js";
 import { AgyError, retryAfterSeconds } from "./errors.js";
+import { withAgentSystem } from "./request-instructions.js";
 import { warn, info as lifecycleInfo } from "./log.js";
 
 export const PLUGIN_ID = "opencode-antigravity";
@@ -230,6 +231,14 @@ export const AntigravityPlugin = Plugin.define({
       for (const kind of ["context", "compaction", "generate", "title"] as const) {
         await ctx.session.hook(kind, stripAcpOwnedOptions, { providerID: PROVIDER_ID });
       }
+
+      // Read the agent itself, not the system assembled from host instructions,
+      // skills and environment. A failed lookup must not leak the generated system.
+      await ctx.session.hook("http.request", async event => {
+        if (event.kind !== "primary") return;
+        const agent = await ctx.agent.get({ agentID: event.agent });
+        event.request = await withAgentSystem(event.request, agent.data.system);
+      }, { providerID: PROVIDER_ID });
 
       await ctx.session.hook("retry", event => {
         if (!event.decision.retry) return;

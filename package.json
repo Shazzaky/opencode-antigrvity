@@ -1,6 +1,6 @@
 {
   "name": "@rasyid_rafi/opencode-antigravity",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "OpenCode V2 provider adapter for Google's official Antigravity server via ACP",
   "license": "MIT",
   "repository": {

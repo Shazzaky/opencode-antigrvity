@@ -1,5 +1,6 @@
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
+export const HOST_MCP_SERVER_NAME = "external_tool";
 /** A deliberately non-secret value used by the loopback adapter. */
 export const LOCAL_API_KEY = "opencode-antigravity-local";
 

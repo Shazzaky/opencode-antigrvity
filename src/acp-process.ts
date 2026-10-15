@@ -309,7 +309,6 @@ export class AcpWorker {
       const init = await this.withSignal(agent.request(methods.agent.initialize, {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: "opencode-antigravity", version: "0.6.2" },
       }), signal);
       this.initValue = init;
       await this.openSession(agent, signal);
@@ -576,7 +575,7 @@ export class AcpWorker {
     const meta = (params.toolCall as { _meta?: { mcp?: { server?: string } } })._meta;
     // The isolated harness contains only our session-bound MCP endpoint.
     const dispatcher = params.toolCall.title === "Run call_mcp_tool?";
-    const allowed = (meta?.mcp?.server === "opencode" || dispatcher) && Boolean(this.options.mcpServers?.length);
+    const allowed = (this.options.mcpServers?.some(server => server.name === meta?.mcp?.server) || dispatcher) && Boolean(this.options.mcpServers?.length);
     const option = params.options.find((item) => item.kind === (allowed ? "allow_once" : "reject_once"));
     return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
   }

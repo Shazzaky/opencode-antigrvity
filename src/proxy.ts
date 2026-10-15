@@ -418,10 +418,12 @@ async function handleMessages(request: Request, body: AnthropicMessageRequest): 
     events = hostBridge(`host-v1:${key}`, sessionID, cwd).request({ messages: body.messages, system: body.system, tools: body.tools, settings,
       baseURL: getProxyBaseUrl().replace(/\/v1$/, ""), requestId: readHeader(request, MESSAGE_HEADER), signal: request.signal });
   } else {
-    const normalized = await normalizePrompt(requestMessages, { allowedRoots: [cwd], hostTools: true, signal: request.signal });
+    // System instructions are supplied once, via hostInstructions below; do
+    // not also reconstruct them as an instruction-update history message.
+    const normalized = await normalizePrompt(body.messages, { allowedRoots: [cwd], hostTools: true, signal: request.signal });
     events = sessionPool.turn({ key, requestId: readHeader(request, MESSAGE_HEADER), prompt: normalized.blocks,
       messages: normalized.messages, hostSessionID: sessionID,
-      priorMessages: normalized.priorMessages.filter((m) => m.role !== "system"), instructions: hostInstructions(body.system, cwd), settings, signal: request.signal });
+      priorMessages: normalized.priorMessages.filter((m) => m.role !== "system"), instructions: hostInstructions(body.system), settings, signal: request.signal });
   }
   const probed = await probeTurn(events);
   if ("error" in probed) return errorResponse(probed.error);

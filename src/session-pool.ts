@@ -127,7 +127,7 @@ function workerOptions(settings: SessionSettings, sessionId?: string): AcpWorker
 async function reconstructionBlocks(message: HostMessage, cwd: string, budget: MediaMaterializationBudget): Promise<ContentBlock[]> {
   if (message.role === "system") return [{ type: "text", text: `<instruction-update>\n${extractTextContent(message.content)}\n</instruction-update>` }];
   if (message.role === "user" && Array.isArray(message.content) && message.content.some((p: any) => p?.type === "tool_result")) return hostResultMessageToAcp(message, [cwd], budget);
-  if (message.role === "user" && (!Array.isArray(message.content) || message.content.every((p: any) => !["tool_result", "tool_use"].includes(p?.type)))) return [{ type: "text", text: "[user]" }, ...await messageContentToAcp(message.content, [cwd], budget)];
+  if (message.role === "user" && (!Array.isArray(message.content) || message.content.every((p: any) => !["tool_result", "tool_use"].includes(p?.type)))) return messageContentToAcp(message.content, [cwd], budget);
   return [{ type: "text", text: buildBoundedHistory([message], Number.MAX_SAFE_INTEGER) }];
 }
 
@@ -216,7 +216,10 @@ export class SessionPool {
     const record = await sessionStore.get(request.key);
     const incoming = request.messages ? fingerprints(request.messages) : undefined;
     const accepted = record?.conversation ?? entry.conversation;
-    const aligned = request.messages ? Boolean(incoming && accepted?.resumable && record?.executionProfile === profile && extendsBoundary(accepted.boundary, incoming)) : Boolean(entry.worker && entry.settingsSignature === signature);
+    // Instruction changes (including clearing the prompt) cannot inherit an ACP
+    // trajectory containing the previous system. Rebuild from host history.
+    const sameInstructions = accepted?.instructions === (request.instructions ?? "");
+    const aligned = request.messages ? Boolean(incoming && accepted?.resumable && sameInstructions && record?.executionProfile === profile && extendsBoundary(accepted.boundary, incoming)) : Boolean(entry.worker && sameInstructions && entry.settingsSignature === signature);
     if (!aligned && request.hostSessionID && await sessionStore.executionBinding(request.hostSessionID)) {
       // Retire provenance before startup, including failed replacements.
       entry.executionGeneration = randomUUID();
